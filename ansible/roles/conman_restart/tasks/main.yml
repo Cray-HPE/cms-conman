@@ -1,0 +1,8 @@
+# Copyright 2020, Cray Inc. All Rights Reserved.
+---
+- name: Get conman pod namespace
+  shell: "kubectl get pods -A -l {{ conman_label }} -o custom-columns=NS:.metadata.namespace --no-headers"
+  register: conman_namespace
+
+- name: Restart conman to pick up new nodes
+  shell: "kubectl delete pods -n {{ conman_namespace.stdout }} -l {{ conman_label }}"
