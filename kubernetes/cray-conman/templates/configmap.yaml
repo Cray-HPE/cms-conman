@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conman-config
+  namespace: services
+data:
+  # The log identifier is used to name a node's console file.  It is a value
+  # obtained from in the Hardware State Manager's RedfishEndpoints component API.
+  # Useful values are
+  # 1. Hostname -- the node's hostname, often a NID
+  # 2. ID, the node's xname
+  LOG_IDENTIFIER: "{{ .Values.conman_config.cray_conman_log_identifier }}"
+
+  # SMD Service URL
+  SMD_URL: "{{ .Values.conman_config.cray_conman_smd_url }}"
+
+  # Redfish Endpoint URL
+  RF_ENDPOINT: "{{ .Values.conman_config.cray_conman_rf_endpoint }}"

@@ -1,0 +1,17 @@
+# Copyright 2019 - 2020 Cray Inc. All rights reserved.
+
+# Dockerfile for creating a base image that can be used
+# for other images to do testing, coverage, and building.
+
+# Build base just has the packages installed we need.
+FROM dtr.dev.cray.com/baseos/golang:1.14-alpine3.11 as build-base
+
+RUN set -ex \
+    && apk update \
+    && apk add build-base
+
+# Copy the files in for the next stages to use.
+FROM build-base
+
+COPY *.go namespace token $GOPATH/src/stash.us.cray.com/HMS/hms-securestorage/
+COPY vendor $GOPATH/src/stash.us.cray.com/HMS/hms-securestorage/vendor
