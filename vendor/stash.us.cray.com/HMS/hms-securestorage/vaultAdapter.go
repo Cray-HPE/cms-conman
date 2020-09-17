@@ -8,9 +8,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mitchellh/mapstructure"
 	"github.com/hashicorp/vault/api"
+	"github.com/mitchellh/mapstructure"
 )
+
 const DefaultBasePath = "secret"
 
 // These Env var are provided globally to pods
@@ -42,10 +43,10 @@ const EnvVaultAuthPath = "CRAY_VAULT_AUTH_PATH"
 // VAULT_SKIP_VERIFY="true"
 
 type VaultAdapter struct {
-	Config *api.Config
-	Client VaultApi
+	Config     *api.Config
+	Client     VaultApi
 	AuthConfig *AuthConfig
-	BasePath string
+	BasePath   string
 	VaultRetry int
 }
 
@@ -53,7 +54,7 @@ type VaultAdapter struct {
 // vault.
 func NewVaultAdapter(basePath string) (SecureStorage, error) {
 	ss := &VaultAdapter{
-		BasePath: basePath,
+		BasePath:   basePath,
 		VaultRetry: 1,
 	}
 
@@ -129,11 +130,22 @@ func (ss *VaultAdapter) loadToken() error {
 	return nil
 }
 
+func (ss *VaultAdapter) checkErrForTokenRefresh(err error) bool {
+	lowerErrorString := strings.ToLower(err.Error())
+
+	if strings.Contains(lowerErrorString, "code: 403") ||
+		strings.Contains(lowerErrorString, "missing client token") {
+		return true
+	}
+
+	return false
+}
+
 // Write a struct to Vault at the location specified by key. This function
 // prepends the basePath. Retries are implemented for token renewal.
 func (ss *VaultAdapter) Store(key string, value interface{}) error {
-var (
-		err error
+	var (
+		err  error
 		data map[string]interface{}
 	)
 
@@ -146,7 +158,7 @@ var (
 		// Write the data to Vault
 		_, err = ss.Client.Write(path, data)
 		if err != nil {
-			if strings.Contains(err.Error(), "Code: 403") {
+			if ss.checkErrForTokenRefresh(err) {
 				// We need to renew the token and then retry
 				if err = ss.loadToken(); err != nil {
 					return err
@@ -176,7 +188,7 @@ func (ss *VaultAdapter) Lookup(key string, output interface{}) error {
 		// Read the data from Vault
 		secretValues, err := ss.Client.Read(path)
 		if err != nil {
-			if strings.Contains(err.Error(), "Code: 403") {
+			if ss.checkErrForTokenRefresh(err) {
 				// We need to renew the token and then retry
 				if err = ss.loadToken(); err != nil {
 					return err
@@ -211,7 +223,7 @@ func (ss *VaultAdapter) Delete(key string) error {
 		// Remove the key and data from Vault
 		_, err := ss.Client.Delete(path)
 		if err != nil {
-			if strings.Contains(err.Error(), "Code: 403") {
+			if ss.checkErrForTokenRefresh(err) {
 				// We need to renew the token and then retry
 				if err = ss.loadToken(); err != nil {
 					return err
@@ -233,7 +245,7 @@ func (ss *VaultAdapter) Delete(key string) error {
 // renewal.
 func (ss *VaultAdapter) LookupKeys(keyPath string) ([]string, error) {
 	var (
-		err error
+		err   error
 		klist []string
 	)
 
@@ -241,7 +253,7 @@ func (ss *VaultAdapter) LookupKeys(keyPath string) ([]string, error) {
 	for i := 0; i <= ss.VaultRetry; i++ {
 		secretValues, err := ss.Client.List(path)
 		if err != nil {
-			if strings.Contains(err.Error(), "Code: 403") {
+			if ss.checkErrForTokenRefresh(err) {
 				// We need to renew the token and then retry
 				if err = ss.loadToken(); err != nil {
 					return nil, err
@@ -275,20 +287,19 @@ func (ss *VaultAdapter) LookupKeys(keyPath string) ([]string, error) {
 
 // AuthConfig struct for vault k8s authentication
 type AuthConfig struct {
-	JWTFile string
+	JWTFile  string
 	RoleFile string
-	Path string
-	jwt string
-	role string
+	Path     string
+	jwt      string
+	role     string
 }
-
 
 // DefaultAuthConfig Create the default auth config that will work for almost all scenarios
 func DefaultAuthConfig() *AuthConfig {
 	authConfig := &AuthConfig{
-		JWTFile: "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		JWTFile:  "/var/run/secrets/kubernetes.io/serviceaccount/token",
 		RoleFile: "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
-		Path: "auth/kubernetes/login",
+		Path:     "auth/kubernetes/login",
 	}
 
 	return authConfig
@@ -356,7 +367,6 @@ func (authConfig *AuthConfig) GetAuthPath() string {
 	return authConfig.Path
 }
 
-
 // GetAuthArgs generates the ars required for generating an auth token
 func (authConfig *AuthConfig) GetAuthArgs() map[string]interface{} {
 	authArgs := map[string]interface{}{
@@ -383,7 +393,7 @@ type RealVaultApi struct {
 	Client *api.Client
 }
 
-func NewRealVaultApi(client *api.Client) (VaultApi) {
+func NewRealVaultApi(client *api.Client) VaultApi {
 	v := &RealVaultApi{
 		Client: client,
 	}

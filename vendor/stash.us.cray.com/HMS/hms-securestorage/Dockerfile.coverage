@@ -1,0 +1,9 @@
+# Copyright 2019 - 2020 Cray Inc. All rights reserved.
+
+# Dockerfile for running testing coverage on securestorage HMS code.
+
+FROM cray/hms-securestorage-build-base
+
+# Run coverage.
+RUN set -ex \
+    && go test -cover -v stash.us.cray.com/HMS/hms-securestorage/...

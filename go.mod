@@ -1,5 +1,7 @@
 module stash.us.cray.com/SCMS/cms-conman
 
-go 1.12
+go 1.13
 
-require stash.us.cray.com/HMS/hms-common v1.5.3
+require stash.us.cray.com/HMS/hms-compcredentials v1.6.2
+
+require stash.us.cray.com/HMS/hms-securestorage v1.7.0
