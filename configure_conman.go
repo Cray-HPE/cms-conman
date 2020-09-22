@@ -140,8 +140,10 @@ func getPasswords(endpoints []redfishEndpoint) map[string]compcreds.CompCredenti
 
 // read the begining of the input file to see if we should skip this update
 func willUpdateConfig(fp *os.File) bool {
-	// if the first line of the base configuration file has '# UDPATE_CONFIG=FALSE'
+	// if the first line of the base configuration file has '# UPDATE_CONFIG=FALSE'
 	// then bail on the update
+	// NOTE: only reading first 50 bytes of file, should be at least that many
+	//  present if this is a valid base configuration file and don't need to read more.
 	buff := make([]byte, 50)
 	n, err := fp.Read(buff)
 	if err != nil || n < 50 {
@@ -166,7 +168,7 @@ func willUpdateConfig(fp *os.File) bool {
 		log.Printf("Didn't find update string")
 	}
 
-	// reset the file pointer
+	// reset the file pointer so later read starts at begining of file
 	_, err = fp.Seek(0, 0)
 	if err != nil {
 		log.Printf("Reset of file pointer to begining of file failed:%s", err)
@@ -180,6 +182,7 @@ func updateConfigFile(forceUpdate bool) {
 	log.Print("Updating the configuration file")
 
 	// open the base file
+	log.Printf("Opening base configuration file: %s", baseConfFile)
 	bf, err := os.Open(baseConfFile)
 	if err != nil {
 		// log the problem and bail
@@ -230,6 +233,7 @@ func updateConfigFile(forceUpdate bool) {
 	}
 
 	// open the configuration file for output
+	log.Printf("Opening conman configuration file for output: %s", confFile)
 	cf, err := os.OpenFile(confFile, os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		// log the problem and panic
@@ -249,7 +253,7 @@ func updateConfigFile(forceUpdate bool) {
 
 	// Add River endpoints to the config file to be accessed by ipmi
 	for _, endpoint := range riverNodes {
-		// log the output line withtout the password present
+		// log the output line without the password present
 		log.Printf("console name=\"%s\" dev=\"ipmi:%s\" ipmiopts=\"U:%s,P:REDACTED,W:solpayloadsize\"\n",
 			endpoint.ID,
 			endpoint.FQDN,
@@ -268,12 +272,27 @@ func updateConfigFile(forceUpdate bool) {
 	}
 }
 
+// Take the output of the pipe and log it
+func logPipeOutput(readPipe *io.ReadCloser, desc string) {
+	log.Printf("Starting log of conmand %s output", desc)
+	er := bufio.NewReader(*readPipe)
+	for {
+		// read the next line
+		line, err := er.ReadString('\n')
+		if err != nil {
+			log.Printf("Ending %s logging from error:%s", desc, err)
+			break
+		}
+		log.Print(line)
+	}
+}
+
 // Execute the conman process
 func executeConman() {
 	// This function  will start an instance of 'conmand' on the local
 	// system, route the output from that process into this log stream,
 	// and exit when that process is killed
-	log.Print("Starting a new intance of conmand")
+	log.Print("Starting a new instance of conmand")
 
 	// Start the conmand command with arguments
 	cmd := exec.Command("conmand", "-F", "-v", "-c", confFile)
@@ -289,34 +308,10 @@ func executeConman() {
 	}
 
 	// spin a thread to read the stderr pipe
-	go func() {
-		log.Print("Starting log of conmand stderr output")
-		errReader := bufio.NewReader(cmdStdErr)
-		for {
-			// read the next line
-			line, err := errReader.ReadString('\n')
-			if err != nil {
-				log.Print("Ending stderr logging from error:%s", err)
-				break
-			}
-			log.Print(line)
-		}
-	}()
+	go logPipeOutput(&cmdStdErr, "stderr")
 
 	// spin a thread to read the stdout pipe
-	go func() {
-		log.Print("Starting log of conmand stdout output")
-		stdOutReader := bufio.NewReader(cmdStdOut)
-		for {
-			// read the next line
-			line, err := stdOutReader.ReadString('\n')
-			if err != nil {
-				log.Print("Ending stdout logging from error:%s", err)
-				break
-			}
-			log.Print(line)
-		}
-	}()
+	go logPipeOutput(&cmdStdOut, "stdout")
 
 	// start the command
 	log.Print("Starting conmand process")
@@ -347,7 +342,7 @@ func main() {
 		forceConfigUpdate = false
 
 		// start the conmand process
-		// NOTE: this function will not exit until the process exits, but
+		// NOTE: this function will not exit until the process exits, and will
 		//  spin up a new one on exit.  This will allow a user to manually
 		//  kill the conmand process and this will restart while re-reading
 		//  the configuration file.
