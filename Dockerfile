@@ -23,15 +23,14 @@ FROM dtr.dev.cray.com/baseos/sles15sp1:sles15sp1
 
 # Install conman application from package
 RUN set -eux \
-    && zypper --non-interactive install conman less
+    && zypper --non-interactive install conman less vi
 
 # Copy in the needed files
 COPY --from=build /app/configure_conman /app/
-COPY entrypoint.sh /app/
-COPY conman.conf /etc/
+COPY conman.conf /app/conman_base.conf
 
 # Environment Variables -- Used by the HMS secure storage pkg
 ENV VAULT_ADDR="http://cray-vault.vault:8200"
 ENV VAULT_SKIP_VERIFY="true"
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/app/configure_conman"]
