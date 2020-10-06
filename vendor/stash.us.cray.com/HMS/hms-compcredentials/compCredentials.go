@@ -8,7 +8,7 @@ import (
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
-	sstorage "stash.us.cray.com/HMS/hms-common/pkg/securestorage"
+	sstorage "stash.us.cray.com/HMS/hms-securestorage"
 )
 
 const DefaultCompCredPath = "hms-creds"
@@ -16,8 +16,8 @@ const DefaultCompCredPath = "hms-creds"
 // Usage example using vault as the backing secure storage:
 //import (
 //    "log"
-//    sstorage "stash.us.cray.com/HMS/hms-common/pkg/securestorage"
-//    cc "stash.us.cray.com/HMS/hms-common/pkg/compcredentials"
+//    sstorage "stash.us.cray.com/HMS/hms-securestorage"
+//    cc "stash.us.cray.com/HMS/hms-compcredentials"
 //)
 //func compCredVaultExample() {
 //    // Create the Vault adapter and connect to Vault
@@ -27,7 +27,7 @@ const DefaultCompCredPath = "hms-creds"
 //        panic(err)
 //    }
 //
-//    // Initialize the CompCredStore struct with the Vault adapter. 
+//    // Initialize the CompCredStore struct with the Vault adapter.
 //    ccs := NewCompCredStore("hms-creds", ss)
 //
 //    // Create a new set of credentials for a component.
@@ -84,7 +84,7 @@ type CompCredStore struct {
 func NewCompCredStore(keyPath string, ss sstorage.SecureStorage) *CompCredStore {
 	ccs := &CompCredStore{
 		CCPath: keyPath,
-		SS: ss,
+		SS:     ss,
 	}
 	return ccs
 }
@@ -93,7 +93,7 @@ func NewCompCredStore(keyPath string, ss sstorage.SecureStorage) *CompCredStore 
 func (ccs *CompCredStore) GetCompCred(xname string) (CompCredentials, error) {
 	var compCred CompCredentials
 
-	err := ccs.SS.Lookup(ccs.CCPath + "/" + xname, &compCred)
+	err := ccs.SS.Lookup(ccs.CCPath+"/"+xname, &compCred)
 	if err != nil {
 		return compCred, err
 	}
@@ -139,7 +139,7 @@ func (ccs *CompCredStore) GetCompCreds(xnames []string) (map[string]CompCredenti
 
 // Store the credentials for a component in the secure store.
 func (ccs *CompCredStore) StoreCompCred(compCred CompCredentials) error {
-	err := ccs.SS.Store(ccs.CCPath + "/" + compCred.Xname, compCred)
+	err := ccs.SS.Store(ccs.CCPath+"/"+compCred.Xname, compCred)
 	if err != nil {
 		return err
 	}
@@ -148,14 +148,17 @@ func (ccs *CompCredStore) StoreCompCred(compCred CompCredentials) error {
 }
 
 type CompCredentials struct {
-	Xname    string `json:"xname"`
-	URL      string `json:"url"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Xname        string `json:"xname"`
+	URL          string `json:"url"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	SNMPAuthPass string `json:"SNMPAuthPass,omitempty"`
+	SNMPPrivPass string `json:"SNMPPrivPass,omitempty"`
 }
 
 // Due to the sensitive nature of the data in CompCredentials, make a custom String function
 // to prevent passwords from being printed directly (accidentally) to output.
 func (compCred CompCredentials) String() string {
-	return fmt.Sprintf("URL: %s, Username: %s, Password: <REDACTED>", compCred.URL, compCred.Username)
+	return fmt.Sprintf("URL: %s, Username: %s, Password: <REDACTED>, SNMP Passes: <REDACTED>/<REDACTED>",
+		compCred.URL, compCred.Username)
 }
