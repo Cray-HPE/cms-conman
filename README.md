@@ -23,6 +23,47 @@ locations indicated by USER_FILE and PWD_FILE with the container.
 # PORTS
 The conman daemon, conmand, listens on port 7890.
 
+# Restarting conman daemon
+The configure_conman application stays running and will monitor the conmand
+process.  To restart conman and pick up any hardware changes since the last
+restart, just kill the running conmand process.  It will automatically 
+run the configuration to check for current hardware and restart conmand.
+```bash
+sh-4.4# ps -ax
+    PID TTY      STAT   TIME COMMAND
+      1 ?        Ssl    0:00 /app/configure_conman
+    114 pts/0    Ss     0:00 sh
+   1042 ?        Sl     0:00 conmand -F -v -c /etc/conman.conf
+   1060 pts/0    R+     0:00 ps -ax
+sh-4.4# kill 1042
+```
+The benefit to restarting and refreshing the configuration in this manner is
+that it only takes seconds to restart while a complete pod restart can take
+quite a bit longer.
+
+When the conmand process is restarted it will sever all existing console 
+connections.
+
+# Manual changes to the conman configuration file
+Inside the pod, the base configuration file is located at /app/conman_base.conf.
+This file is copied in its entirety for the begining of the /etc/conman.conf file
+used to start the conmand process.  The individual console connection configurations
+are added after the base file contents.  The file at /etc/conman.conf is overwritten
+and all manual changes are lost when the process is restarted.
+
+In order to make and preserve manual changes to the /etc/conman.conf file, modify the
+first line of the /app/conman_base.conf file to:
+```
+# UPDATE_CONFIG=FALSE
+```
+This will prevent the automatic configuration update from happening and the conmand
+process will be restarted with the existing /etc/conman.conf file.  To re-enble the
+automatic updates again, revert the first line of /app/conman_base.conf to:
+```
+# UPDATE_CONFIG=TRUE
+```
+
+
 # Build and run the Docker image
 # This will not likely work on a non-Cray environment because conman will exit
 # if it does have any nodes to contact.
