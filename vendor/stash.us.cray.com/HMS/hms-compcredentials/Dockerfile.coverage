@@ -1,0 +1,8 @@
+# Dockerfile for running testing coverage on compcredentials HMS code.
+# Copyright 2019 Cray Inc. All rights reserved.
+
+FROM cray/hms-compcredentials-build-base
+
+# Run coverage.
+RUN set -ex \
+    && go test -cover -v stash.us.cray.com/HMS/hms-compcredentials/...
