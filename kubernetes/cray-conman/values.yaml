@@ -19,6 +19,13 @@ cray-service:
     - name: cray-conman
       image:
         repository: cray/cray-conman
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+        requests:
+          cpu: 10m
+          memory: 64Mi
       envFrom:
       - configMapRef:
           name: conman-config
@@ -40,6 +47,14 @@ cray-service:
           - /etc/conman.conf
         initialDelaySeconds: 20
         periodSeconds: 10
+    - name: console-logs
+      image:
+        repository: baseos/alpine
+        tag: 3.11.5
+      args: [/bin/sh, -c, 'tail -n 0 -f /var/log/conman/consoleAgg.log']
+      volumeMounts:
+      - name: cray-conman-logs
+        mountPath: /var/log
   volumes:
     - name: cray-conman-logs
       persistentVolumeClaim:
