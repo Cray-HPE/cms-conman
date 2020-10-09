@@ -16,7 +16,8 @@ cray-service:
   type: Deployment
   nameOverride: cray-conman
   containers:
-    - name: cray-conman
+    cray-conman:
+      name: cray-conman
       image:
         repository: cray/cray-conman
       resources:
@@ -30,8 +31,8 @@ cray-service:
       - configMapRef:
           name: conman-config
       volumeMounts:
-        - mountPath: /var/log/
-          name: cray-conman-logs
+      - mountPath: /var/log/
+        name: cray-conman-logs
       livenessProbe:
         exec:
           command:
@@ -47,7 +48,8 @@ cray-service:
           - /etc/conman.conf
         initialDelaySeconds: 20
         periodSeconds: 10
-    - name: console-logs
+    console-logs:
+      name: console-logs
       image:
         repository: baseos/alpine
         tag: 3.11.5
@@ -56,14 +58,16 @@ cray-service:
       - name: cray-conman-logs
         mountPath: /var/log
   volumes:
-    - name: cray-conman-logs
+    cray-conman-logs:
+      name: cray-conman-logs
       persistentVolumeClaim:
         claimName: cray-conman-data-claim
   storageClass: ceph-cephfs-external
   persistentVolumeClaims:
-    - name: data-claim # will be prefixed with cray-conman-
+    data-claim:
+      name: data-claim # will be prefixed with cray-conman-
       accessModes:
-        - ReadWriteMany
+      - ReadWriteMany
       resources:
         requests:
           storage: 5Gi
