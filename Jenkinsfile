@@ -6,5 +6,5 @@ dockerBuildPipeline {
     description = "Cray Management System conman logging service"
     repository = "cray"
     imagePrefix = "cray"
-    product = "shasta-premium,shasta-standard"
+    product = "csm"
 }

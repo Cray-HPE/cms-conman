@@ -1,6 +1,6 @@
 @Library('dst-shared') _
 rpmBuild(
-    product: "shasta-standard,shasta-premium",
+    product: "csm",
     target_node: "ncn",
     channel: "casmcms-builds",
     fanout_params: ["sle15sp1"]
