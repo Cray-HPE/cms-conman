@@ -1,0 +1,3 @@
+# Copyright 2020, Cray Inc. All Rights Reserved.
+---
+conman_label: "app.kubernetes.io/name=cray-conman"
