@@ -23,12 +23,13 @@ FROM dtr.dev.cray.com/baseos/sles15sp1:sles15sp1
 
 # Install conman application from package
 RUN set -eux \
-    && zypper --non-interactive install conman less vi openssh
+    && zypper --non-interactive install conman less vi openssh jq curl
 
 # Copy in the needed files
 COPY --from=build /app/configure_conman /app/
 COPY conman.conf /app/conman_base.conf
 COPY ssh-console /usr/bin
+COPY console-ssh-keygen /app/console-ssh-keygen
 
 # Environment Variables -- Used by the HMS secure storage pkg
 ENV VAULT_ADDR="http://cray-vault.vault:8200"
