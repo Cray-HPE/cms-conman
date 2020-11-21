@@ -100,12 +100,14 @@ func getURL(URL string) ([]byte, error) {
 	if err != nil {
 		// handle error
 		log.Printf("Error on request to %s: %s", URL, err)
+		return nil, err
 	}
 	log.Printf("Response Status code: %d\n", resp.StatusCode)
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		// handle error
 		log.Printf("Error reading response: %s", err)
+		return nil, err
 	}
 	//fmt.Printf("Data: %s\n", data)
 	return data, err
@@ -119,6 +121,7 @@ func postURL(URL string, requestBody []byte) ([]byte, error) {
 	if err != nil {
 		// handle error
 		log.Printf("Error on request to %s: %s", URL, err)
+		return nil, err
 	}
 	log.Printf("Response Status code: %d\n", resp.StatusCode)
 	defer resp.Body.Close()
@@ -126,6 +129,7 @@ func postURL(URL string, requestBody []byte) ([]byte, error) {
 	if err != nil {
 		// handle error
 		log.Printf("Error reading response: %s", err)
+		return nil, err
 	}
 	//fmt.Printf("Data: %s\n", data)
 	return data, err
@@ -574,10 +578,10 @@ func generateMountainConsoleCredentials() error {
 	cmd.Stdout = &outBuf
 	err := cmd.Run()
 	if err != nil {
+		log.Printf("Error generating console key pair: %s", err)
 		return errors.New(fmt.Sprintf("Error generating console key pair: %s", err))
-	} else {
-		return nil
 	}
+	return nil
 }
 
 // Ensure that Mountain node console credentials are properly deployed.
@@ -652,13 +656,13 @@ func ensureMountainConsoleKeysDeployed(nodes []nodeConsoleInfo) {
 	} else {
 		for _, t := range scsdReply.Targets {
 			if t.StatusCode != 204 {
-				log.Printf("scsd FAILED to deploy ssh key to Xname: %s -> %s %s", t.Xname, t.StatusCode, t.StatusMsg)
+				log.Printf("scsd FAILED to deploy ssh key to BMC: %s -> %d %s", t.Xname, t.StatusCode, t.StatusMsg)
 			} else {
 				log.Printf("scsd deployed ssh console key to: %s", t.Xname)
 			}
 		}
 	}
-	// TBD - Beyond just logging the status, determine if there is better more preferred way
+	// TBD - Beyond just logging the status, determine if there is a more preferred way
 	// to deal with any specific failures to deploy a BMC ssh cosole key.
 	// Scsd response example:
 	//  {"Xname":"x5000c1s2b0","StatusCode":204,"StatusMsg":"OK"}
