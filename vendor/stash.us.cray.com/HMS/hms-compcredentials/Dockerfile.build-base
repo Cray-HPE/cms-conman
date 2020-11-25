@@ -1,0 +1,14 @@
+# Dockerfile for creating a base image that can be used for other images to do testing, coverage, and building.
+# Copyright 2019 Cray Inc. All rights reserved.
+
+# Build base just has the packages installed we need.
+FROM golang:alpine as build-base
+
+RUN set -ex \
+    && apk add build-base
+
+# Copy the files in for the next stages to use.
+FROM build-base
+
+COPY compCredentials.go compCredentials_test.go $GOPATH/src/stash.us.cray.com/HMS/hms-compcredentials/
+COPY vendor $GOPATH/src/stash.us.cray.com/HMS/hms-compcredentials/vendor

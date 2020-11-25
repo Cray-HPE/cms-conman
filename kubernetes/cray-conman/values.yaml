@@ -1,0 +1,77 @@
+# Please refer to https://stash.us.cray.com/projects/CLOUD/repos/cray-charts/browse/stable/cray-service/values.yaml?at=refs%2Fheads%2Fmaster
+# for more info on values you can set/override
+# Note that cray-service.containers[*].image and cray-service.initContainers[*].image map values are one of the only structures that
+# differ from the standard kubernetes container spec:
+# image:
+#   repository: ""
+#   tag: "" (default = "latest")
+#   pullPolicy: "" (default = "IfNotPresent")
+
+conman_config:
+  cray_conman_log_identifier: 'ID'
+  cray_conman_smd_url: 'http://cray-smd'
+  cray_conman_rf_endpoint: 'hsm/v1/Inventory/RedfishEndpoints'
+
+cray-service:
+  type: Deployment
+  nameOverride: cray-conman
+  containers:
+    cray-conman:
+      name: cray-conman
+      image:
+        repository: cray/cray-conman
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+        requests:
+          cpu: 10m
+          memory: 64Mi
+      envFrom:
+      - configMapRef:
+          name: conman-config
+      volumeMounts:
+      - mountPath: /var/log/
+        name: cray-conman-logs
+      livenessProbe:
+        exec:
+          command:
+          - cat
+          - /etc/conman.conf
+        initialDelaySeconds: 15
+        periodSeconds: 10
+      readinessProbe:
+        exec:
+          command:
+          - grep
+          - 'console'
+          - /etc/conman.conf
+        initialDelaySeconds: 20
+        periodSeconds: 10
+    console-logs:
+      name: console-logs
+      image:
+        repository: baseos/alpine
+        tag: 3.11.5
+      args: [/bin/sh, -c, 'tail -n 0 -f /var/log/conman/consoleAgg.log']
+      volumeMounts:
+      - name: cray-conman-logs
+        mountPath: /var/log
+  volumes:
+    cray-conman-logs:
+      name: cray-conman-logs
+      persistentVolumeClaim:
+        claimName: cray-conman-data-claim
+  storageClass: ceph-cephfs-external
+  persistentVolumeClaims:
+    data-claim:
+      name: data-claim # will be prefixed with cray-conman-
+      accessModes:
+      - ReadWriteMany
+      resources:
+        requests:
+          storage: 5Gi
+  ingress:
+    enabled: false
+  strategy:
+    type: Recreate
