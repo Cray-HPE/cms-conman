@@ -1,7 +1,7 @@
 #!/usr/bin/expect --
 # This can be called from within the context of conman to
 # establish an ssh connection to a Mountain node console.
-# Usage and examples below assume this script's name is 
+# Usage and examples below assume this script's name is
 # ssh-console and located on the system under /usr/bin
 #
 # Usage: ssh-console xname
@@ -9,16 +9,17 @@
 #
 # Example /etc/conman.conf entry:
 # console name="x5000c3s6b0n0" dev="/usr/bin/ssh-console x5000c3s6b0n0"
+#
+# Copyright 2020 Hewlett Packard Enterprise Development LP
 
 set env(TERM) xterm
 set controller [string range [lindex $argv 0] 0 end-2]
 set session [string range [lindex $argv 0] end-1 end]
 set timeout -1
-set pid [spawn ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i /conman/conman.key $session@$controller]
+set pid [spawn ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i /etc/conman.key $session@$controller]
 exit -onexit {
   exec kill $pid
   wait $pid
   exp_exit
 }
 interact
-

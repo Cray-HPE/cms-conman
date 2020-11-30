@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -26,6 +27,11 @@ import (
 const baseConfFile string = "/app/conman_base.conf"
 const confFile string = "/etc/conman.conf"
 const conAggLogFile string = "/var/log/conman/consoleAgg.log"
+
+// Location of the Mountain BMC console ssh key pair files.
+// These are obtained or generated when the pod is created.
+const mountainConsoleKey string = "/etc/conman.key"
+const mountainConsoleKeyPub string = "/etc/conman.key.pub"
 
 // Global vars
 var conAggLogger *log.Logger = nil
@@ -74,6 +80,18 @@ func (nc nodeConsoleInfo) String() string {
 		nc.NodeName, nc.BmcName, nc.BmcFqdn, nc.Class, nc.NID, nc.Role)
 }
 
+// Struct to hold the individual scsd node status
+type scsdNode struct {
+	Xname      string `json:"Xname"`
+	StatusCode int    `json:"StatusCode"`
+	StatusMsg  string `json:"StatusMsg"`
+}
+
+// Struct to hold the overall scsd reposnse
+type scsdList struct {
+	Targets []scsdNode `json:"Targets"`
+}
+
 // Helper function to execute an http command
 func getURL(URL string) ([]byte, error) {
 	var err error = nil
@@ -82,12 +100,36 @@ func getURL(URL string) ([]byte, error) {
 	if err != nil {
 		// handle error
 		log.Printf("Error on request to %s: %s", URL, err)
+		return nil, err
 	}
 	log.Printf("Response Status code: %d\n", resp.StatusCode)
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		// handle error
 		log.Printf("Error reading response: %s", err)
+		return nil, err
+	}
+	//fmt.Printf("Data: %s\n", data)
+	return data, err
+}
+
+// Helper function to execute an http POST command
+func postURL(URL string, requestBody []byte) ([]byte, error) {
+	var err error = nil
+	log.Printf("URL: %s\n", URL)
+	resp, err := http.Post(URL, "application/json", bytes.NewBuffer(requestBody))
+	if err != nil {
+		// handle error
+		log.Printf("Error on request to %s: %s", URL, err)
+		return nil, err
+	}
+	log.Printf("Response Status code: %d\n", resp.StatusCode)
+	defer resp.Body.Close()
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		// handle error
+		log.Printf("Error reading response: %s", err)
+		return nil, err
 	}
 	//fmt.Printf("Data: %s\n", data)
 	return data, err
@@ -208,7 +250,7 @@ func willUpdateConfig(fp *os.File) bool {
 }
 
 // Update the configuration file with the current river endpoints
-func updateConfigFile(forceUpdate bool) (rvrNodes, mtnNodes []string) {
+func updateConfigFile(forceUpdate bool) (rvrNodes, mtnNodes []string, nodes []nodeConsoleInfo) {
 	log.Print("Updating the configuration file")
 	rvrNodes = nil
 	mtnNodes = nil
@@ -248,7 +290,7 @@ func updateConfigFile(forceUpdate bool) (rvrNodes, mtnNodes []string) {
 	}
 
 	// create river and mountain node information
-	var nodes []nodeConsoleInfo = nil
+	nodes = nil
 	var xnames []string = nil
 	for _, sc := range stComps {
 		if sc.Type == "Node" {
@@ -316,17 +358,14 @@ func updateConfigFile(forceUpdate bool) (rvrNodes, mtnNodes []string) {
 			// record this as an active river node console
 			rvrNodes = append(rvrNodes, nodeCi.NodeName)
 		} else if nodeCi.Class == "Mountain" {
-			// NOTE: there are a few issues to work out with mountain
-			//  connections - to re-enable uncomment these lines
-			// connect using ssh via expect script
-			//log.Printf("console name=\"%s\" dev=\"/usr/bin/ssh-console %s\"\n",
-			//	nodeCi.NodeName,
-			//	nodeCi.NodeName)
+			log.Printf("console name=\"%s\" dev=\"/usr/bin/ssh-console %s\"\n",
+				nodeCi.NodeName,
+				nodeCi.NodeName)
 			// write the line to the config file
-			//output = fmt.Sprintf("console name=\"%s\" dev=\"/usr/bin/ssh-console %s\"\n",
-			//	nodeCi.NodeName,
-			//	nodeCi.NodeName)
-			//mtnNodes = append(mtnNodes, nodeCi.NodeName)
+			output = fmt.Sprintf("console name=\"%s\" dev=\"/usr/bin/ssh-console %s\"\n",
+				nodeCi.NodeName,
+				nodeCi.NodeName)
+			mtnNodes = append(mtnNodes, nodeCi.NodeName)
 		}
 
 		// write the output line if there is anything present
@@ -340,7 +379,7 @@ func updateConfigFile(forceUpdate bool) (rvrNodes, mtnNodes []string) {
 
 	}
 
-	return rvrNodes, mtnNodes
+	return rvrNodes, mtnNodes, nodes
 }
 
 // Watch the input file and append any new content to the aggregate console log file
@@ -514,6 +553,129 @@ func killZombie(pid int) {
 	log.Printf("Cleaned up zombie process: %d", pid)
 }
 
+// Obtain Mountain node BMC credentials from Vault.
+func vaultGetMountainConsoleCredentials() error {
+	// NOTE: Returning false for now since Vault is not available on a system
+	// with Mountain hardware.
+
+	// NOTE: The final implementation would obtain the public and private
+	// keys and save to /etc/conman.key.pub and /etc/conman.key
+	// respectively.  Vault will also need to be asked to generate
+	// the keypair should it not exist.
+	return errors.New("Vault credental access not implemented yet.")
+}
+
+// Used to generate Mountain console credentials in the event
+// they can not be provided by Vault.
+func generateMountainConsoleCredentials() error {
+	// Generate an ssh key pair (/etc/conman.key and /etc/conman.key.pub)
+	// This will overwrite the existing public or private key files.
+	var outBuf bytes.Buffer
+	//cmd := exec.Command("/usr/bin/ssh-keygen", "-qf", mountainConsoleKey, "-N", "''", "<<<y")
+	// Error code 1 ...  TBD debug this further and eliminate the script if possible.
+	cmd := exec.Command("/app/console-ssh-keygen")
+	cmd.Stderr = &outBuf
+	cmd.Stdout = &outBuf
+	err := cmd.Run()
+	if err != nil {
+		log.Printf("Error generating console key pair: %s", err)
+		return errors.New(fmt.Sprintf("Error generating console key pair: %s", err))
+	}
+	return nil
+}
+
+// Ensure that Mountain node console credentials are properly deployed.
+func ensureMountainConsoleKeysDeployed(nodes []nodeConsoleInfo) {
+	// Ensure that we have a console ssh key pair.  If the key pair
+	// is not on the local file system then obtain it from Vault.  If
+	// Vault is not available or we are otherwise unable to obtain the key
+	// pair then generate it and log a message.  We want to minimize any
+	// loss of console logs or console access due to a missing ssh
+	// key pair.
+
+	// Check that we have key pair files on local storage
+	_, err_key := os.Stat(mountainConsoleKey)
+	_, err_pub := os.Stat(mountainConsoleKeyPub)
+	if os.IsNotExist(err_key) || os.IsNotExist(err_pub) {
+		// does not exist
+		log.Printf("Obtaining Mountain console credentials from Vault")
+		if err := vaultGetMountainConsoleCredentials(); err != nil {
+			log.Printf("%s", err)
+			log.Printf("Generating Mountain console credentials.")
+			if err := generateMountainConsoleCredentials(); err != nil {
+				log.Printf("Unable to generate credentials.  Error was: %s", err)
+				return
+			}
+		}
+	}
+
+	// Read in the public key.
+	pubKey, err := ioutil.ReadFile(mountainConsoleKeyPub)
+	if err != nil {
+		log.Printf("Unable to read the public key file: %s", err)
+		return
+	}
+
+	// Obtain the list of Mountain bmcs from the node list.
+	// Note there are two nodes per bmc and one update per bmc
+	// is all that is required to set the ssh console key for
+	// both nodes.
+	mtnBmcList := make(map[string]string)
+	for _, nodeCi := range nodes {
+		if nodeCi.Class == "Mountain" {
+			// log.Printf("Found BMC: %s %s", nodeCi.BmcName, nodeCi.BmcFqdn)
+			mtnBmcList[nodeCi.BmcFqdn] = nodeCi.BmcName
+		}
+	}
+	mtnNodeBmcArray := make([]string, 0, len(mtnBmcList))
+	for bmcName := range mtnBmcList {
+		mtnNodeBmcArray = append(mtnNodeBmcArray, bmcName)
+	}
+
+	// Create an HMS scsd json structure containing the Mountain BMC list and
+	// the public key to deploy.
+	scsdParam := map[string]interface{}{
+		"Targets": mtnNodeBmcArray,
+		"Params": map[string]string{
+			"SSHConsoleKey": string(pubKey),
+		},
+		"Force": false,
+	}
+	jsonScsdParam, _ := json.Marshal(scsdParam)
+	log.Printf("Preparing to call scsd with the parameters:\n %s", string(jsonScsdParam))
+
+	// Call the HMS scsd service to deploy the public key.
+	log.Print("Calling scsd to deploy Mountain BMC ssh key(s)")
+	URL := "http://cray-scsd/v1/bmc/loadcfg"
+	data, err := postURL(URL, jsonScsdParam)
+	scsdReply := scsdList{}
+	err = json.Unmarshal(data, &scsdReply)
+	if err != nil {
+		log.Printf("Error unmarshalling the reply from scsd: %s", err)
+		return
+	} else {
+		for _, t := range scsdReply.Targets {
+			if t.StatusCode != 204 {
+				log.Printf("scsd FAILED to deploy ssh key to BMC: %s -> %d %s", t.Xname, t.StatusCode, t.StatusMsg)
+			} else {
+				log.Printf("scsd deployed ssh console key to: %s", t.Xname)
+			}
+		}
+	}
+	// TBD - Beyond just logging the status, determine if there is a more preferred way
+	// to deal with any specific failures to deploy a BMC ssh cosole key.
+	// Scsd response example:
+	//  {"Xname":"x5000c1s2b0","StatusCode":204,"StatusMsg":"OK"}
+	// Example errors:
+	//  {"Xname":"x5000c2s5b0","StatusCode":422,"StatusMsg":"Target 'x5000c2s5b0' in bad HSM state: Unknown"}
+	//  {"Xname":"x5000c3r1b0","StatusCode":500,"StatusMsg":"Internal Server Error"}
+	//
+	// In addition perhpas we want to keep a map (map[string]string) of hostname to
+	// public key as a record of the deployment success or errors on a per
+	// BMC and public key basis.  This could be used in the future to reduce the time
+	// to redeploy all keys.
+}
+
 // Main loop for the application
 func main() {
 	// NOTE: this is a work in progress starting to restructure this application
@@ -544,7 +706,7 @@ func main() {
 	for {
 		// Set up or update the conman configuration file.
 		// NOTE: do not let the user skip the update the first time through
-		rvrNodes, mtnNodes := updateConfigFile(forceConfigUpdate)
+		rvrNodes, mtnNodes, nodes := updateConfigFile(forceConfigUpdate)
 		forceConfigUpdate = false
 
 		// update the list of tracked files and track new ones
@@ -562,6 +724,10 @@ func main() {
 				go watchConsoleLogFile(node)
 			}
 		}
+
+		// Make sure that we have a proper ssh console keypair deployed
+		// here and on the Mountain BMCs before starting conman.
+		ensureMountainConsoleKeysDeployed(nodes)
 
 		// start the conmand process
 		// NOTE: this function will not exit until the process exits, and will
