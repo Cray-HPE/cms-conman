@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hpcloud/tail"
+	"github.com/tidwall/gjson"
 	compcreds "stash.us.cray.com/HMS/hms-compcredentials"
 	sstorage "stash.us.cray.com/HMS/hms-securestorage"
 )
@@ -32,6 +33,21 @@ const conAggLogFile string = "/var/log/conman/consoleAgg.log"
 // These are obtained or generated when the pod is created.
 const mountainConsoleKey string = "/etc/conman.key"
 const mountainConsoleKeyPub string = "/etc/conman.key.pub"
+
+// Location of the Kubernetes service account token used to authenticate
+// to Vault.  This is part of the pod deployment.
+const svcAcctTokenFile string = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+// The Vault base URI
+const vaultBase = "http://cray-vault.vault:8200/v1"
+
+// The Vault specific secret name of the Conman Mountain BMC console private key.
+// If this secret does not exist Vault will be asked to create it.
+const vaultBmcKeyName = "mountain-bmc-console"
+
+// The Vault key type used when generating a new key intented for use with
+// Mountian console ssh.
+const vaultBmcKeyAlg = "rsa-2048"
 
 // Global vars
 var conAggLogger *log.Logger = nil
@@ -93,46 +109,72 @@ type scsdList struct {
 }
 
 // Helper function to execute an http command
-func getURL(URL string) ([]byte, error) {
+func getURL(URL string, requestHeaders map[string]string) ([]byte, int, error) {
 	var err error = nil
-	log.Printf("URL: %s\n", URL)
-	resp, err := http.Get(URL)
+	log.Printf("getURL URL: %s\n", URL)
+	req, err := http.NewRequest("GET", URL, nil)
 	if err != nil {
 		// handle error
-		log.Printf("Error on request to %s: %s", URL, err)
-		return nil, err
+		log.Printf("getURL Error creating new request to %s: %s", URL, err)
+		return nil, -1, err
 	}
-	log.Printf("Response Status code: %d\n", resp.StatusCode)
+	if requestHeaders != nil {
+		for k, v := range requestHeaders {
+			req.Header.Add(k, v)
+		}
+	}
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		// handle error
+		log.Printf("getURL Error on request to %s: %s", URL, err)
+		return nil, -1, err
+	}
+	log.Printf("getURL Response Status code: %d\n", resp.StatusCode)
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		// handle error
 		log.Printf("Error reading response: %s", err)
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
 	//fmt.Printf("Data: %s\n", data)
-	return data, err
+	return data, resp.StatusCode, err
 }
 
 // Helper function to execute an http POST command
-func postURL(URL string, requestBody []byte) ([]byte, error) {
+func postURL(URL string, requestBody []byte, requestHeaders map[string]string) ([]byte, int, error) {
 	var err error = nil
-	log.Printf("URL: %s\n", URL)
-	resp, err := http.Post(URL, "application/json", bytes.NewBuffer(requestBody))
+	log.Printf("postURL URL: %s\n", URL)
+	req, err := http.NewRequest("POST", URL, bytes.NewReader(requestBody))
 	if err != nil {
 		// handle error
-		log.Printf("Error on request to %s: %s", URL, err)
-		return nil, err
+		log.Printf("postURL Error creating new request to %s: %s", URL, err)
+		return nil, -1, err
 	}
-	log.Printf("Response Status code: %d\n", resp.StatusCode)
+	req.Header.Add("Content-Type", "application/json")
+	if requestHeaders != nil {
+		for k, v := range requestHeaders {
+			req.Header.Add(k, v)
+		}
+	}
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		// handle error
+		log.Printf("postURL Error on request to %s: %s", URL, err)
+		return nil, -1, err
+	}
+
+	log.Printf("postURL Response Status code: %d\n", resp.StatusCode)
 	defer resp.Body.Close()
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		// handle error
-		log.Printf("Error reading response: %s", err)
-		return nil, err
+		log.Printf("postURL Error reading response: %s", err)
+		return nil, resp.StatusCode, err
 	}
 	//fmt.Printf("Data: %s\n", data)
-	return data, err
+	return data, resp.StatusCode, err
 }
 
 // Query hsm for redfish endpoint information
@@ -144,7 +186,7 @@ func getRedfishEndpoints() ([]redfishEndpoint, error) {
 
 	// RedfishEndpointURL
 	URL := "http://cray-smd/hsm/v1/Inventory/RedfishEndpoints"
-	data, err := getURL(URL)
+	data, _, err := getURL(URL, nil)
 	rp := response{}
 	err = json.Unmarshal(data, &rp)
 	if err != nil {
@@ -170,7 +212,7 @@ func getStateComponents() ([]stateComponent, error) {
 
 	// state components URL
 	URL := "http://cray-smd/hsm/v1/State/Components"
-	data, err := getURL(URL)
+	data, _, err := getURL(URL, nil)
 	rp := response{}
 	err = json.Unmarshal(data, &rp)
 	if err != nil {
@@ -553,16 +595,208 @@ func killZombie(pid int) {
 	log.Printf("Cleaned up zombie process: %d", pid)
 }
 
-// Obtain Mountain node BMC credentials from Vault.
-func vaultGetMountainConsoleCredentials() error {
-	// NOTE: Returning false for now since Vault is not available on a system
-	// with Mountain hardware.
+// Ask Vault to generate a private key.  This method is called when it is necessary
+// to have Vault create the key when it is missing or to enable future support
+// for key rotation.  When a future REST api is added to supoort Conman operations
+// this method should provide the backing support for key rotation.
+func vaultGeneratePrivateKey(vaultToken string) (response []byte, responseCode int, err error) {
+	// Create the parameters
+	vaultParam := map[string]string{
+		"type":       vaultBmcKeyAlg,
+		"exportable": "true",
+	}
+	jsonVaultParam, err := json.Marshal(vaultParam)
+	log.Printf("Preparing to ask Vault to generate the key with the parameters:\n %s",
+		string(jsonVaultParam))
+	if err != nil {
+		return response, responseCode, err
+	}
 
-	// NOTE: The final implementation would obtain the public and private
-	// keys and save to /etc/conman.key.pub and /etc/conman.key
-	// respectively.  Vault will also need to be asked to generate
-	// the keypair should it not exist.
-	return errors.New("Vault credental access not implemented yet.")
+	// Tell vault to create the private key
+	URL := vaultBase + "/transit/keys/" + vaultBmcKeyName
+	vaultRequestHeaders := make(map[string]string)
+	vaultRequestHeaders["X-Vault-Token"] = vaultToken
+	response, responseCode, err = postURL(URL, jsonVaultParam, vaultRequestHeaders)
+
+	// Return any general error.
+	if err != nil {
+		return response, responseCode, err
+	}
+
+	if responseCode == 204 {
+		log.Printf("A new seceret for %s was generated in vault.", vaultBmcKeyName)
+		return response, responseCode, nil
+	} else {
+		// Return an error for any unhandled http reposponse code.
+		log.Printf(
+			"Unexpected response from Vault when generating the key: %s  Http repsonse code: %d",
+			response, responseCode)
+		return response, responseCode, errors.New(fmt.Sprintf(
+			"Unexpected response from Vault when generating the key: %s  Http repsonse code: %d",
+			response, responseCode))
+	}
+}
+
+// Ask vault for the private key
+func vaultExportPrivateKey(vaultToken string) (pvtKey string, response []byte, responseCode int, err error) {
+	URL := vaultBase + "/transit/export/signing-key/" + vaultBmcKeyName
+	vaultRequestHeaders := make(map[string]string)
+	vaultRequestHeaders["X-Vault-Token"] = vaultToken
+	response, responseCode, err = getURL(URL, vaultRequestHeaders)
+	// Handle any general error with the request.
+	if err != nil {
+		log.Printf(
+			"Unable to get the %s secret from vault: %s  Error was: %s",
+			vaultBmcKeyName, err)
+		return "", response, responseCode, errors.New(fmt.Sprintf(
+			"Unable to get the %s secret from vault: %s  Error was: %s",
+			vaultBmcKeyName, err))
+	}
+
+	if responseCode == 404 {
+		log.Printf("The vault secret %s was not found. It will need to be created.", vaultBmcKeyName)
+
+		return "", response, 404, nil
+	} else if responseCode == 200 {
+		// Return the secret we found
+		jsonElem := "data.keys.1" // See https://github.com/tidwall/gjson#path-syntax
+		pvtKey := gjson.Get(string(response), jsonElem)
+		if len(pvtKey.String()) == 0 {
+			log.Printf(
+				"Empty or missing %s element in Vault response",
+				jsonElem)
+			return "", response, responseCode, errors.New(fmt.Sprintf(
+				"Empty or missing %s element in Vault response",
+				jsonElem))
+		}
+		return pvtKey.String(), response, 200, nil
+	} else {
+		// Return an error for any unhandled http reposponse code.
+		log.Printf(
+			"Unexpected response from Vault: %s  Http repsonse code: %d",
+			response, responseCode)
+		return "", response, responseCode, errors.New(fmt.Sprintf(
+			"Unexpected response from Vault: %s  Http repsonse code: %d",
+			response, responseCode))
+	}
+}
+
+// Obtain the private key from Vault.  The private key (aka Vault secret) is the
+// only piece of the key pair which is stored in Vault.  The public key piece is
+// created from the private via the standard ssh-keygen utility.
+// If the private key can not be found then vault will be asked to generate and
+// reuturn the new key.
+func vaultGetPrivateKey(vaultToken string) (pvtKey string, err error) {
+	// Ask vault for the existing key
+	pvtKey, response, responseCode, err := vaultExportPrivateKey(vaultToken)
+	if err != nil {
+		return "", err
+	}
+
+	if responseCode == 200 {
+		// Return the private key that was found in vault.
+		return pvtKey, nil
+	} else if responseCode == 404 {
+		// Ask vault to generate a private key.
+		response, responseCode, err := vaultGeneratePrivateKey(vaultToken)
+		if err != nil {
+			return "", err
+		}
+
+		// Handle any unexpected http error when generating the key.
+		if responseCode != 200 {
+			return "", errors.New(fmt.Sprintf(
+				"Unexpected response from Vault when generating the key: %s  Http repsonse code: %d",
+				response, responseCode))
+		}
+
+		// Ask vault again to export the newly generated private key.
+		pvtKey, response, responseCode, err = vaultExportPrivateKey(vaultToken)
+		if err != nil {
+			return "", err
+		}
+		if responseCode != 200 {
+			return "", errors.New(fmt.Sprintf(
+				"Unexpected response from Vault when requesting the key: %s  Http repsonse code: %d",
+				response, responseCode))
+		}
+
+		// Return the private key that was found in vault.
+		return pvtKey, nil
+
+	} else {
+		// Handle an unexpected http response when initially requesting the key.
+		return "", errors.New(fmt.Sprintf(
+			"Unexpected response from Vault when requesting the key: %s  Http repsonse code: %d",
+			response, responseCode))
+	}
+}
+
+// Obtain Mountain node BMC credentials from Vault and stage them to the
+// local file syetem.  A specific error will be returned in the event of
+// any issues.
+func vaultGetMountainConsoleCredentials() error {
+	// Generate an ssh key pair (/etc/conman.key and /etc/conman.key.pub)
+	// This will overwrite the existing public or private key files.
+
+	// Authenticate to Vault
+	svcAcctToken, err := ioutil.ReadFile(svcAcctTokenFile)
+	if err != nil {
+		log.Printf("Unable to read the service account token file: %s  Can not authenticate to vault.", err)
+		return errors.New(fmt.Sprintf("Unable to read the service account token file: %s  Can not authenticate to vault.", err))
+	}
+
+	vaultAuthParam := map[string]string{
+		"jwt":  string(svcAcctToken),
+		"role": "ssh-user-certs-compute"}
+	jsonVaultAuthParam, _ := json.Marshal(vaultAuthParam)
+	URL := vaultBase + "/auth/kubernetes/login"
+	log.Printf("Attempting to authenticate to Vault at: %s", URL)
+	response, responseCode, err := postURL(URL, jsonVaultAuthParam, nil)
+	if err != nil {
+		log.Printf("Unable to authenticate to Vault: %s", err)
+		return errors.New(fmt.Sprintf("Unable to authenticate to Vault: %s", err))
+	}
+	// If the response code is not 200 then we failed authenticaton.
+	if responseCode != 200 {
+		log.Printf(
+			"Vault authentication failed.  Response code: %d  Message: %s",
+			responseCode, string(response))
+		return errors.New(fmt.Sprintf(
+			"Vault authentication failed.  Response code: %d  Message: %s",
+			responseCode, string(response)))
+	}
+	log.Printf("Vault authentication was successful.  Attempting to get BMC console key from vault")
+	vaultToken := gjson.Get(string(response), "auth.client_token")
+
+	// Get the private key from Vault.
+	pvtKey, err := vaultGetPrivateKey(vaultToken.String())
+	if err != nil {
+		return err
+	}
+	log.Printf("Obtained BMC console key from vault.")
+
+	// Write the private key to the local file system.
+	err = ioutil.WriteFile(mountainConsoleKey, []byte(pvtKey), 0600)
+	if err != nil {
+		log.Printf("Failed to wtite our the private ssh key received from Vault.")
+		return err
+	}
+
+	// Extract the public key from the private and convert to ssh format.
+	log.Printf("Atempting to obtain BMC public console key.")
+	var outBuf bytes.Buffer
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("ssh-keygen -yf %s > %s",
+		mountainConsoleKey, mountainConsoleKeyPub))
+	cmd.Stderr = &outBuf
+	cmd.Stdout = &outBuf
+	err = cmd.Run()
+	if err != nil {
+		log.Printf("Error extracting the public key: %s", err)
+		return err
+	}
+	log.Printf("Successfully obtained BMC public console key.")
+	return nil // no error
 }
 
 // Used to generate Mountain console credentials in the event
@@ -647,7 +881,7 @@ func ensureMountainConsoleKeysDeployed(nodes []nodeConsoleInfo) {
 	// Call the HMS scsd service to deploy the public key.
 	log.Print("Calling scsd to deploy Mountain BMC ssh key(s)")
 	URL := "http://cray-scsd/v1/bmc/loadcfg"
-	data, err := postURL(URL, jsonScsdParam)
+	data, _, err := postURL(URL, jsonScsdParam, nil)
 	scsdReply := scsdList{}
 	err = json.Unmarshal(data, &scsdReply)
 	if err != nil {
