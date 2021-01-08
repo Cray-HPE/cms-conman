@@ -48,8 +48,8 @@ cray-service:
           - /etc/conman.conf
         initialDelaySeconds: 20
         periodSeconds: 10
-    console-logs:
-      name: console-logs
+    log-forwarding:
+      name: log-forwarding
       image:
         repository: baseos/alpine
         tag: 3.11.5
