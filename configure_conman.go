@@ -1,4 +1,4 @@
-// Copyright 2019-2020 Hewlett Packard Enterprise Development LP
+// Copyright 2019-2021 Hewlett Packard Enterprise Development LP
 
 package main
 
@@ -27,7 +27,8 @@ import (
 // Location of the configuration file
 const baseConfFile string = "/app/conman_base.conf"
 const confFile string = "/etc/conman.conf"
-const conAggLogFile string = "/var/log/conman/consoleAgg.log"
+const consoleLogDir string = "/var/log/conman"
+const conAggLogFile string = consoleLogDir + "/consoleAgg.log"
 
 // Location of the Mountain BMC console ssh key pair files.
 // These are obtained or generated when the pod is created.
@@ -449,7 +450,7 @@ func watchConsoleLogFile(xname string) {
 	}
 
 	// full path to the file
-	filename := fmt.Sprintf("/var/log/conman/console.%s", xname)
+	filename := fmt.Sprintf("%s/console.%s", consoleLogDir, xname)
 	log.Printf("Starting to parse file: %s", filename)
 
 	// start the tail operation
@@ -924,10 +925,20 @@ func main() {
 	// NOTE: this logger is thread safe, set to not append any additional
 	//  information per line, and to overwrite the file at conAggLogFile
 	//  on startup.
+	if _, err := os.Stat(consoleLogDir); os.IsNotExist(err) {
+		log.Printf("Log directory %s does not exist - attempting to create it.", consoleLogDir)
+		// directory does not exist - create it
+		err := os.MkdirAll(consoleLogDir, 0700)
+		if err != nil {
+			// if we can't create the direcotry the log files belong to, time to bail
+			log.Panicf("ERROR - not able to create log dir %s: %s", consoleLogDir, err)
+		}
+	}
 	calf, err := os.OpenFile(conAggLogFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		log.Printf("Could not open console aggregate log file: %s", err)
 	} else {
+		log.Printf("Aggregating log file: %s", conAggLogFile)
 		conAggLogger = log.New(calf, "", 0)
 		conAggLogger.Print("Starting aggregation log")
 	}
