@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -16,6 +17,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hpcloud/tail"
@@ -27,8 +30,10 @@ import (
 // Location of the configuration file
 const baseConfFile string = "/app/conman_base.conf"
 const confFile string = "/etc/conman.conf"
-const consoleLogDir string = "/var/log/conman"
-const conAggLogFile string = consoleLogDir + "/consoleAgg.log"
+const logRotDir string = "/var/log/conman.old"
+const conAggLogFile string = "/var/log/conman/consoleAgg.log"
+const logRotConfFile string = "/etc/logrotate.d/conman"
+const logRotStateFile string = "/var/log/rot_conman.state"
 
 // Location of the Mountain BMC console ssh key pair files.
 // These are obtained or generated when the pod is created.
@@ -51,6 +56,7 @@ const vaultBmcKeyName = "mountain-bmc-console"
 const vaultBmcKeyAlg = "rsa-2048"
 
 // Global vars
+var conAggMutex = &sync.Mutex{}
 var conAggLogger *log.Logger = nil
 
 // Struct to hold hsm redfish endpoint information
@@ -138,6 +144,7 @@ func getURL(URL string, requestHeaders map[string]string) ([]byte, int, error) {
 		log.Printf("Error reading response: %s", err)
 		return nil, resp.StatusCode, err
 	}
+	// NOTE: Dumping entire response clogs up the log file but keep for debugging
 	//fmt.Printf("Data: %s\n", data)
 	return data, resp.StatusCode, err
 }
@@ -180,14 +187,26 @@ func postURL(URL string, requestBody []byte, requestHeaders map[string]string) (
 
 // Query hsm for redfish endpoint information
 func getRedfishEndpoints() ([]redfishEndpoint, error) {
+	// if running in debug mode, skip hsm query
+	if debugOnly {
+		log.Print("DEBUGONLY mode - skipping redfish endpoints query")
+		return nil, nil
+	}
+
 	log.Print("Gathering redfish endpoints from HSM")
 	type response struct {
 		RedfishEndpoints []redfishEndpoint
 	}
 
-	// RedfishEndpointURL
+	// Query hsm to get the redfish endpoints
 	URL := "http://cray-smd/hsm/v1/Inventory/RedfishEndpoints"
 	data, _, err := getURL(URL, nil)
+	if err != nil {
+		log.Printf("Unable to get redfish endpoints from hsm:%s", err)
+		return nil, err
+	}
+
+	// decode the response
 	rp := response{}
 	err = json.Unmarshal(data, &rp)
 	if err != nil {
@@ -205,15 +224,27 @@ func getRedfishEndpoints() ([]redfishEndpoint, error) {
 
 // Query hsm for state component information
 func getStateComponents() ([]stateComponent, error) {
+	// if running in debug mode, skip hsm query
+	if debugOnly {
+		log.Print("DEBUGONLY mode - skipping state components query")
+		return nil, nil
+	}
+
 	log.Print("Gathering state components from HSM")
 	// get the component states from hsm - includes river/mountain information
 	type response struct {
 		Components []stateComponent
 	}
 
-	// state components URL
+	// get the state components from hsm
 	URL := "http://cray-smd/hsm/v1/State/Components"
 	data, _, err := getURL(URL, nil)
+	if err != nil {
+		log.Printf("Unable to get state component information from hsm:%s", err)
+		return nil, err
+	}
+
+	// decode the response
 	rp := response{}
 	err = json.Unmarshal(data, &rp)
 	if err != nil {
@@ -231,6 +262,12 @@ func getStateComponents() ([]stateComponent, error) {
 
 // Look up the creds for the input endpoints
 func getPasswords(bmcXNames []string) map[string]compcreds.CompCredentials {
+	// if running in debug mode, skip hsm query
+	if debugOnly {
+		log.Print("DEBUGONLY mode - skipping creds query")
+		return nil
+	}
+
 	// Get the passwords from Hashicorp Vault
 	log.Print("Gathing creds from vault")
 
@@ -317,13 +354,15 @@ func updateConfigFile(forceUpdate bool) (rvrNodes, mtnNodes []string, nodes []no
 	// conman is only set up for River nodes.
 	rfEndpoints, err := getRedfishEndpoints()
 	if err != nil {
-		log.Panicf("Error fetching redfish endpoints: %s", err)
+		log.Printf("Unable to build configuration file - error fetching redfish endpoints: %s", err)
+		return nil, nil, nil
 	}
 
 	// get the state information to find mountain/river designation
 	stComps, err := getStateComponents()
 	if err != nil {
-		log.Panicf("Error fetching state components: %s", err)
+		log.Printf("Unable to build configuration file - error fetching state components: %s", err)
+		return nil, nil, nil
 	}
 
 	// create a lookup map for the redfish information
@@ -445,12 +484,13 @@ func watchConsoleLogFile(xname string) {
 		Follow:    true,
 		ReOpen:    true,
 		MustExist: false,
+		Poll:      true, // NOTE: it looks like file events don't work - poll instead
 		Logger:    tail.DiscardingLogger,
 		Location:  &tail.SeekInfo{Offset: 0, Whence: 2}, // set to open at the current end of file
 	}
 
 	// full path to the file
-	filename := fmt.Sprintf("%s/console.%s", consoleLogDir, xname)
+	filename := fmt.Sprintf("/var/log/conman/console.%s", xname)
 	log.Printf("Starting to parse file: %s", filename)
 
 	// start the tail operation
@@ -465,7 +505,32 @@ func watchConsoleLogFile(xname string) {
 	//  reading as the file is updated - this read should not end
 	for line := range tf.Lines {
 		// log the line
-		conAggLogger.Printf("console.hostname: %s %s", xname, line.Text)
+		writeToAggLog(fmt.Sprintf("console.hostname: %s %s", xname, line.Text))
+	}
+}
+
+// function to manage writes to the aggragation log
+func writeToAggLog(str string) {
+	conAggMutex.Lock()
+	defer conAggMutex.Unlock()
+	if conAggLogger != nil {
+		conAggLogger.Printf("%s", str)
+	}
+}
+
+// Function to close/open a new aggregation logger
+func respinAggLog() {
+	// when the file changes due to log rotation we must recreate the logger
+	conAggMutex.Lock()
+	defer conAggMutex.Unlock()
+	log.Printf("Respinning aggregation log")
+	calf, err := os.OpenFile(conAggLogFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		log.Printf("Could not open console aggregate log file: %s", err)
+	} else {
+		log.Printf("Restarted aggregation log file")
+		conAggLogger = log.New(calf, "", 0)
+		conAggLogger.Print("Starting aggregation log")
 	}
 }
 
@@ -491,15 +556,20 @@ func executeConman() {
 	// and exit when that process is killed
 	log.Print("Starting a new instance of conmand")
 
+	// NOTE - should not happen, just checking
+	if command != nil {
+		log.Print("ERROR: command not nil on entry to executeComman!!")
+	}
+
 	// Start the conmand command with arguments
-	cmd := exec.Command("conmand", "-F", "-v", "-c", confFile)
+	command = exec.Command("conmand", "-F", "-v", "-c", confFile)
 
 	// capture the stderr and stdout pipes from this command
-	cmdStdErr, err := cmd.StderrPipe()
+	cmdStdErr, err := command.StderrPipe()
 	if err != nil {
 		log.Panicf("Unable to connect to conmand stderr pipe: %s", err)
 	}
-	cmdStdOut, err := cmd.StdoutPipe()
+	cmdStdOut, err := command.StdoutPipe()
 	if err != nil {
 		log.Panicf("Unable to connect to conmand stdout pipe: %s", err)
 	}
@@ -512,16 +582,30 @@ func executeConman() {
 
 	// start the command
 	log.Print("Starting conmand process")
-	if err = cmd.Start(); err != nil {
+	if err = command.Start(); err != nil {
 		log.Panicf("Unable to start the command: %s", err)
 	}
 
 	// wait for the process to exit
 	// NOTE - execution will stop here until the process completes!
-	if err = cmd.Wait(); err != nil {
-		log.Panicf("Error from command wait: %s", err)
+	if err = command.Wait(); err != nil {
+		// Report error and pause before trying again
+		log.Printf("Error from command wait: %s", err)
+		time.Sleep(15 * time.Second)
 	}
+	command = nil
 	log.Print("Conmand process has exited")
+}
+
+// Function to sent SIGHUP to running conmand process
+func signalConman() {
+	// send interupt to tell conman to re-initialize
+	if command != nil {
+		log.Print("Signaling conman with SIGHUP")
+		command.Process.Signal(syscall.SIGHUP)
+	} else {
+		log.Print("Warning: Attempting to signal conman process when nil.")
+	}
 }
 
 // Function to scan the process table for zombie processes
@@ -624,18 +708,18 @@ func vaultGeneratePrivateKey(vaultToken string) (response []byte, responseCode i
 		return response, responseCode, err
 	}
 
-	if responseCode == 204 {
-		log.Printf("A new seceret for %s was generated in vault.", vaultBmcKeyName)
-		return response, responseCode, nil
-	} else {
+	if responseCode != 204 {
 		// Return an error for any unhandled http reposponse code.
 		log.Printf(
 			"Unexpected response from Vault when generating the key: %s  Http repsonse code: %d",
 			response, responseCode)
-		return response, responseCode, errors.New(fmt.Sprintf(
+		return response, responseCode, fmt.Errorf(
 			"Unexpected response from Vault when generating the key: %s  Http repsonse code: %d",
-			response, responseCode))
+			response, responseCode)
 	}
+
+	log.Printf("A new seceret for %s was generated in vault.", vaultBmcKeyName)
+	return response, responseCode, nil
 }
 
 // Ask vault for the private key
@@ -648,10 +732,9 @@ func vaultExportPrivateKey(vaultToken string) (pvtKey string, response []byte, r
 	if err != nil {
 		log.Printf(
 			"Unable to get the %s secret from vault: %s  Error was: %s",
-			vaultBmcKeyName, err)
-		return "", response, responseCode, errors.New(fmt.Sprintf(
-			"Unable to get the %s secret from vault: %s  Error was: %s",
-			vaultBmcKeyName, err))
+			vaultBmcKeyName, vaultBase, err)
+		return "", response, responseCode, fmt.Errorf("Unable to get the %s secret from vault: %s  Error was: %s",
+			vaultBmcKeyName, vaultBase, err)
 	}
 
 	if responseCode == 404 {
@@ -666,9 +749,8 @@ func vaultExportPrivateKey(vaultToken string) (pvtKey string, response []byte, r
 			log.Printf(
 				"Empty or missing %s element in Vault response",
 				jsonElem)
-			return "", response, responseCode, errors.New(fmt.Sprintf(
-				"Empty or missing %s element in Vault response",
-				jsonElem))
+			return "", response, responseCode, fmt.Errorf("Empty or missing %s element in Vault response",
+				jsonElem)
 		}
 		return pvtKey.String(), response, 200, nil
 	} else {
@@ -676,9 +758,8 @@ func vaultExportPrivateKey(vaultToken string) (pvtKey string, response []byte, r
 		log.Printf(
 			"Unexpected response from Vault: %s  Http repsonse code: %d",
 			response, responseCode)
-		return "", response, responseCode, errors.New(fmt.Sprintf(
-			"Unexpected response from Vault: %s  Http repsonse code: %d",
-			response, responseCode))
+		return "", response, responseCode, fmt.Errorf("Unexpected response from Vault: %s  Http repsonse code: %d",
+			response, responseCode)
 	}
 }
 
@@ -706,9 +787,9 @@ func vaultGetPrivateKey(vaultToken string) (pvtKey string, err error) {
 
 		// Handle any unexpected http error when generating the key.
 		if responseCode != 200 {
-			return "", errors.New(fmt.Sprintf(
+			return "", fmt.Errorf(
 				"Unexpected response from Vault when generating the key: %s  Http repsonse code: %d",
-				response, responseCode))
+				response, responseCode)
 		}
 
 		// Ask vault again to export the newly generated private key.
@@ -717,9 +798,9 @@ func vaultGetPrivateKey(vaultToken string) (pvtKey string, err error) {
 			return "", err
 		}
 		if responseCode != 200 {
-			return "", errors.New(fmt.Sprintf(
+			return "", fmt.Errorf(
 				"Unexpected response from Vault when requesting the key: %s  Http repsonse code: %d",
-				response, responseCode))
+				response, responseCode)
 		}
 
 		// Return the private key that was found in vault.
@@ -727,9 +808,9 @@ func vaultGetPrivateKey(vaultToken string) (pvtKey string, err error) {
 
 	} else {
 		// Handle an unexpected http response when initially requesting the key.
-		return "", errors.New(fmt.Sprintf(
+		return "", fmt.Errorf(
 			"Unexpected response from Vault when requesting the key: %s  Http repsonse code: %d",
-			response, responseCode))
+			response, responseCode)
 	}
 }
 
@@ -744,7 +825,7 @@ func vaultGetMountainConsoleCredentials() error {
 	svcAcctToken, err := ioutil.ReadFile(svcAcctTokenFile)
 	if err != nil {
 		log.Printf("Unable to read the service account token file: %s  Can not authenticate to vault.", err)
-		return errors.New(fmt.Sprintf("Unable to read the service account token file: %s  Can not authenticate to vault.", err))
+		return fmt.Errorf("Unable to read the service account token file: %s can not authenticate to vault", err)
 	}
 
 	vaultAuthParam := map[string]string{
@@ -756,16 +837,16 @@ func vaultGetMountainConsoleCredentials() error {
 	response, responseCode, err := postURL(URL, jsonVaultAuthParam, nil)
 	if err != nil {
 		log.Printf("Unable to authenticate to Vault: %s", err)
-		return errors.New(fmt.Sprintf("Unable to authenticate to Vault: %s", err))
+		return fmt.Errorf("Unable to authenticate to Vault: %s", err)
 	}
 	// If the response code is not 200 then we failed authenticaton.
 	if responseCode != 200 {
 		log.Printf(
 			"Vault authentication failed.  Response code: %d  Message: %s",
 			responseCode, string(response))
-		return errors.New(fmt.Sprintf(
+		return fmt.Errorf(
 			"Vault authentication failed.  Response code: %d  Message: %s",
-			responseCode, string(response)))
+			responseCode, string(response))
 	}
 	log.Printf("Vault authentication was successful.  Attempting to get BMC console key from vault")
 	vaultToken := gjson.Get(string(response), "auth.client_token")
@@ -814,7 +895,7 @@ func generateMountainConsoleCredentials() error {
 	err := cmd.Run()
 	if err != nil {
 		log.Printf("Error generating console key pair: %s", err)
-		return errors.New(fmt.Sprintf("Error generating console key pair: %s", err))
+		return fmt.Errorf("Error generating console key pair: %s", err)
 	}
 	return nil
 }
@@ -828,10 +909,16 @@ func ensureMountainConsoleKeysDeployed(nodes []nodeConsoleInfo) {
 	// loss of console logs or console access due to a missing ssh
 	// key pair.
 
+	// if running in debug mode there won't be any nodes or vault present
+	if debugOnly {
+		log.Print("Running in debug mode - skipping mountain cred generation")
+		return
+	}
+
 	// Check that we have key pair files on local storage
-	_, err_key := os.Stat(mountainConsoleKey)
-	_, err_pub := os.Stat(mountainConsoleKeyPub)
-	if os.IsNotExist(err_key) || os.IsNotExist(err_pub) {
+	_, errKey := os.Stat(mountainConsoleKey)
+	_, errPub := os.Stat(mountainConsoleKeyPub)
+	if os.IsNotExist(errKey) || os.IsNotExist(errPub) {
 		// does not exist
 		log.Printf("Obtaining Mountain console credentials from Vault")
 		if err := vaultGetMountainConsoleCredentials(); err != nil {
@@ -888,13 +975,12 @@ func ensureMountainConsoleKeysDeployed(nodes []nodeConsoleInfo) {
 	if err != nil {
 		log.Printf("Error unmarshalling the reply from scsd: %s", err)
 		return
-	} else {
-		for _, t := range scsdReply.Targets {
-			if t.StatusCode != 204 {
-				log.Printf("scsd FAILED to deploy ssh key to BMC: %s -> %d %s", t.Xname, t.StatusCode, t.StatusMsg)
-			} else {
-				log.Printf("scsd deployed ssh console key to: %s", t.Xname)
-			}
+	}
+	for _, t := range scsdReply.Targets {
+		if t.StatusCode != 204 {
+			log.Printf("scsd FAILED to deploy ssh key to BMC: %s -> %d %s", t.Xname, t.StatusCode, t.StatusMsg)
+		} else {
+			log.Printf("scsd deployed ssh console key to: %s", t.Xname)
 		}
 	}
 	// TBD - Beyond just logging the status, determine if there is a more preferred way
@@ -911,37 +997,408 @@ func ensureMountainConsoleKeysDeployed(nodes []nodeConsoleInfo) {
 	// to redeploy all keys.
 }
 
+// All the ways a string could be interpreted as 'true'
+func isTrue(str string) bool {
+	// convert to lower case to remove capitalization as an issue
+	lStr := strings.ToLower(str)
+
+	// deal with one char possible values for true
+	if len(lStr) == 1 && (lStr[0] == 't' || lStr[0] == '1') {
+		return true
+	}
+
+	// deal with multiple char possible values for true
+	if len(lStr) > 1 && lStr == "true" {
+		return true
+	}
+
+	// treat everything else as false
+	return false
+}
+
+// Create the log rotation configuration file
+func createLogRotateConf(fileSize string, numRotate int) {
+	// This is the default format supplied by the install of
+	// the conman package.
+	// NOTE: conmand needs the '-HUP' signal to reconnect to
+	//  log files after they have been moved/removed.  We will
+	//  do that ourselves so are removing it from the conf file.
+	/*
+		# /var/log/conman/* {
+		#   compress
+		#   missingok
+		#   nocopytruncate
+		#   nocreate
+		#   nodelaycompress
+		#   nomail
+		#   notifempty
+		#   olddir /var/log/conman.old/
+		#   rotate 4
+		#   sharedscripts
+		#   size=5M
+		#   weekly
+		#   postrotate
+		#     /usr/bin/killall -HUP conmand
+		#   endscript
+		# }
+	*/
+
+	// Open the file for writing
+	log.Printf("Opening conman log rotation configuration file for output: %s", logRotConfFile)
+	lrf, err := os.Create(logRotConfFile)
+	if err != nil {
+		// log the problem and panic
+		log.Printf("Unable to open config file to write: %s", err)
+	}
+	log.Printf("Opened %s", logRotConfFile)
+	defer lrf.Close()
+
+	// Write out the contents of the file
+	fmt.Fprintln(lrf, "# Auto-generated logman configuration file.")
+	fmt.Fprintln(lrf, "/var/log/conman/* { ")
+	//fmt.Fprintln(lrf, "  compress") // need gzip installed or figure out gpg-zip command line
+	fmt.Fprintln(lrf, "  nocompress")
+	fmt.Fprintln(lrf, "  missingok")
+	fmt.Fprintln(lrf, "  nocopytruncate")
+	fmt.Fprintln(lrf, "  nocreate")
+	fmt.Fprintln(lrf, "  nodelaycompress")
+	fmt.Fprintln(lrf, "  nomail")
+	fmt.Fprintln(lrf, "  notifempty")
+	fmt.Fprintln(lrf, "  olddir /var/log/conman.old")
+	fmt.Fprintf(lrf, "  rotate %d\n", numRotate)
+	fmt.Fprintf(lrf, "  size=%s\n", fileSize)
+	fmt.Fprintln(lrf, "}")
+	fmt.Fprintln(lrf, "")
+}
+
+// Parse the timestamp from the input line
+func parseTimestamp(line string) (string, time.Time, bool, bool) {
+	// NOTE: we are expecting a line in the format of:
+	//  "/var/log/conman/console.xname" YYYY-MM-DD-HH-MM-SS
+	var nodeName string
+	var fd time.Time
+	isCon := false
+	isAgg := false
+
+	// if the line does not have a valid console log name, skip
+	const filePrefix string = "/var/log/conman/console."
+	timeStampStr := ""
+	pos := strings.Index(line, filePrefix)
+	nodeStPos := 0
+	if pos != -1 {
+		// found a node log file - pull out the node name and time stamp string
+		nodeStPos = pos + len(filePrefix)
+
+		// pull out the node name
+		posQ2 := strings.Index(line[nodeStPos:], "\"")
+		if posQ2 == -1 {
+			// unexpected - should be a " char at the end of the filename
+			log.Printf("  Unexpected file format - expected quote to close filename")
+			return nodeName, fd, isCon, isAgg
+		}
+
+		// reindex for position in entire line and split
+		posQ2 += nodeStPos
+		nodeName = line[nodeStPos:posQ2]
+		timeStampStr = line[posQ2+2:]
+		isCon = true
+	} else {
+		// see if this is the console aggregation log file
+		pos = strings.Index(line, conAggLogFile)
+		if pos == -1 {
+			// no log files on this line
+			return nodeName, fd, isCon, isAgg
+		}
+
+		// we are dealing with the console aggregation log
+		nodeName = "consoleAgg.log"
+		isAgg = true
+
+		// pull out the position of the timestamp
+		timeStampStr = line[len(conAggLogFile)+pos+2:]
+	}
+
+	//log.Printf("  String parse - nodeName:%s, timeString:%s",nodeName, timeStampStr)
+	// process the line
+	var year, month, day, hour, min, sec int
+	_, err := fmt.Sscanf(timeStampStr, "%d-%d-%d-%d:%d:%d", &year, &month, &day, &hour, &min, &sec)
+	if err != nil {
+		// log the error and skip processing this line
+		log.Printf("Error parsing timestamp: %s, %s", timeStampStr, err)
+		return nodeName, fd, false, false
+	}
+	// current timestamp of this log rotation entry
+	fd = time.Date(year, time.Month(month), day, hour, min, sec, 0, time.Local)
+
+	//log.Printf("  NodeName:%s, timestamp:%s", nodeName, fd.String())
+
+	return nodeName, fd, isCon, isAgg
+}
+
+// Function to collect most recent log rotation timestamps
+func readLogRotTimestamps(fileStamp map[string]time.Time) (conChanged, aggChanged bool) {
+	// read the timestamps from the log rotation state file
+	// NOTE: the state file has the format:
+	//  "full/path/to/file" Y-M-D-H:M:S
+
+	log.Printf("Reading log rotation timestamps")
+
+	// return true if something has changed
+	conChanged = false
+	aggChanged = false
+
+	// open the state file
+	sf, err := os.Open(logRotStateFile)
+	if err != nil {
+		log.Printf("Unable to open log rotation state file %s: %s", logRotStateFile, err)
+		return false, false
+	}
+	defer sf.Close()
+
+	// process the lines in the file
+	// NOTE: we will only look for files with console.xname
+	er := bufio.NewReader(sf)
+	for {
+		// read the next line
+		line, err := er.ReadString('\n')
+		if err != nil {
+			// done reading file
+			break
+		}
+
+		// parse this file timestamp
+		if fileName, fd, isCon, isAgg := parseTimestamp(line); isCon || isAgg {
+			// see if this file already is in the map
+			if _, ok := fileStamp[fileName]; ok {
+				// entry present, check for timestamp equality
+				if fileStamp[fileName] != fd {
+					// update and mark change
+					fileStamp[fileName] = fd
+					if isCon {
+						conChanged = true
+					} else {
+						aggChanged = true
+					}
+				}
+			} else {
+				// not already present in the map so add it and mark change
+				log.Printf("  %s new file - added to map", fileName)
+				fileStamp[fileName] = fd
+				if isCon {
+					conChanged = true
+				} else {
+					aggChanged = true
+				}
+			}
+		}
+	}
+
+	return conChanged, aggChanged
+}
+
+// Function to periodically do the log rotation
+func doLogRotate(checkFreqSec int) {
+	// turn the check frequency into a valid time duration
+	sleepSecs := time.Duration(300) * time.Second
+	if checkFreqSec > 0 {
+		// make sure we have a valid number before converting
+		sleepSecs = time.Duration(checkFreqSec) * time.Second
+	} else {
+		log.Printf("Log rotation freqency invalid, defaulting to 5 min. Input value:%d", checkFreqSec)
+	}
+
+	// keep track of last rotate time for all log files - need to kick
+	// conmand if any log files changed.
+	fileStamp := make(map[string]time.Time)
+	readLogRotTimestamps(fileStamp)
+
+	// loop forever waiting the correct period between checking for log rotations
+	for {
+		// kick off the log rotation command
+		// NOTE: using explicit state file to insure it is on pvc storage and
+		//  to be able to parse it after completion.
+		log.Print("Starting logrotate")
+		cmd := exec.Command("logrotate", "-s", logRotStateFile, logRotConfFile)
+		exitCode := -1
+		if err := cmd.Run(); err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				exitCode = ee.ProcessState.ExitCode()
+				log.Printf("Exit Errro: %s", ee)
+			}
+		} else {
+			exitCode = 0
+		}
+		log.Printf("Log Rotation completed with exit code: %d", exitCode)
+
+		// see if files were actually rotated - kick conmand if needed
+		if conChanged, aggChanged := readLogRotTimestamps(fileStamp); conChanged || aggChanged {
+			// conman must be signaled to reconnect to moved log files
+			if conChanged {
+				log.Print("Log files rotated, signaling conmand")
+				signalConman()
+			}
+
+			// the aggregation log must be restarted for moved file
+			if aggChanged {
+				respinAggLog()
+			}
+
+			// have to restart the fake log file generation as well
+			if debugOnly {
+				go createTestLogFiles(false)
+			}
+		} else {
+			log.Print("No log files changed with logrotate")
+		}
+
+		// sleep until the next check time
+		time.Sleep(sleepSecs)
+	}
+}
+
+// Initialize and start log rotation
+func logRotate() {
+	// Set up the 'backups' directory for logrotation to use
+	log.Printf("Ensuring log rotation backup dir is present:%s", logRotDir)
+	_, err := os.Stat(logRotDir)
+	if os.IsNotExist(err) {
+		emd := os.MkdirAll(logRotDir, 0755)
+		if emd != nil {
+			log.Printf("Error creating logrotation backup dir:%s", err)
+		}
+	}
+
+	// default log rotation values
+	var enableRotation bool = true
+	var fileSize string = "5M"
+	var checkFreqSec = 600 // number of seconds between log rotation checks
+	var numRotate = 2      // number of copies to keep
+
+	// Check for log rotation env vars
+	if val := os.Getenv("LOG_ROT_ENABLE"); val != "" {
+		log.Printf("Found LOG_ROT_ENABLE: %s", val)
+		enableRotation = isTrue(val)
+	}
+	if val := os.Getenv("LOG_ROT_FILE_SIZE"); val != "" {
+		log.Printf("Found LOG_ROT_FILE_SIZE: %s", val)
+		fileSize = val
+	}
+	if val := os.Getenv("LOG_ROT_SEC_FREQ"); val != "" {
+		log.Printf("Found LOG_ROT_SEC_FREQ: %s", val)
+		envFreq, err := strconv.Atoi(val)
+		if err != nil {
+			log.Printf("Error converting log rotation freqency - expected an integer:%s", err)
+		} else {
+			checkFreqSec = envFreq
+		}
+	}
+	if val := os.Getenv("LOG_ROT_NUM_KEEP"); val != "" {
+		log.Printf("Found LOG_ROT_NUM_KEEP: %s", val)
+		envNum, err := strconv.Atoi(val)
+		if err != nil {
+			log.Printf("Error converting log rotation freqency - expected an integer:%s", err)
+		} else {
+			numRotate = envNum
+		}
+	}
+
+	// override settings for debug only
+	if debugOnly {
+		fileSize = "150K"
+		checkFreqSec = 10
+
+		// kick off a process to create fake log files
+		go createTestLogFiles(true)
+	}
+
+	// if not enabled just bail
+	if !enableRotation {
+		log.Printf("Log rotation not enabled")
+		return
+	}
+
+	// log the log rotation parameters
+	log.Printf("Log rotation enabled, File Size:%s, Check Freq Sec: %d, Num Keep: %d", fileSize, checkFreqSec, numRotate)
+
+	// Create the log rotation configuration file
+	createLogRotateConf(fileSize, numRotate)
+
+	// Start the log rotation thread
+	go doLogRotate(checkFreqSec)
+}
+
+// Function to create and add to log files
+func createTestLogFiles(startWatch bool) {
+	var sleepTime time.Duration = 1 * time.Second
+
+	file1, _ := os.OpenFile("/var/log/conman/console.test1", os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
+	file2, _ := os.OpenFile("/var/log/conman/console.test2", os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
+	log1 := log.New(file1, "", log.LstdFlags)
+	log2 := log.New(file2, "", log.LstdFlags)
+
+	if startWatch {
+		go watchConsoleLogFile("test1")
+		go watchConsoleLogFile("test2")
+	}
+	// start a loop that runs forever to write to the log files
+	for {
+		// write out some bulk
+		log1.Print("Start new write:")
+		log2.Print("Start new write:")
+		for i := 0; i < 10; i++ {
+			log1.Print("Log1: ASAS:LDL:KJFSADSDfDSLKJYUIYHIUNMNKJHSDFKJHDSLKJDFHLKJDSFHASKAJUHSDAASDLKJFHLKJHADSLKJDSHFLKJDHFSD:OUISDFLKDJFHASLJKFHDKJFH")
+			log1.Print("Log1: ASAS:LDL:KJFSADSDfDSLKJYUIYHIUNMNKJHSDFKJHDSLKJDFHLKJDSFHASKAJUHSDAASDLKJFHLKJHADSLKJDSHFLKJDHFSD:OUISDFLKDJFHASLJKFHDKJFH")
+			log2.Print("Log2: ASAS:LDL:KJFSADSDfDSLKJYUIYHIUNMNKJHSDFKJHDSLKJDFHLKJDSFHASKAJUHSDAASDLKJFHLKJHADSLKJDSHFLKJDHFSD:OUISDFLKDJFHASLJKFHDKJFH")
+		}
+
+		// wait before writing out again
+		time.Sleep(sleepTime)
+	}
+
+	log.Print("LOGGER TEST EXITED")
+}
+
+// global var to help with local running/debugging
+var debugOnly bool = false
+var command *exec.Cmd = nil
+
 // Main loop for the application
 func main() {
 	// NOTE: this is a work in progress starting to restructure this application
 	//  to manage the console state - watching for hardware changes and
 	//  updating / restarting the conman process when needed
 
+	// parse the command line flags to the application
+	flag.BoolVar(&debugOnly, "debug", false, "Run in debug only mode, not starting conmand")
+	flag.Parse()
+
+	// log the fact if we are in debug mode
+	if debugOnly {
+		log.Print("Running in DEBUG-ONLY mode.")
+	}
+
 	// keep track of the nodes
 	trackedRvrNodes := make(map[string]bool) // xname,tracking
 	trackedMtnNodes := make(map[string]bool) // xname,tracking
+
+	// start the aggregation log
+	respinAggLog()
+
+	// Initialize and start log rotation
+	logRotate()
 
 	// set up a separate logger object for aggregating the console logs
 	// NOTE: this logger is thread safe, set to not append any additional
 	//  information per line, and to overwrite the file at conAggLogFile
 	//  on startup.
-	if _, err := os.Stat(consoleLogDir); os.IsNotExist(err) {
-		log.Printf("Log directory %s does not exist - attempting to create it.", consoleLogDir)
-		// directory does not exist - create it
-		err := os.MkdirAll(consoleLogDir, 0700)
-		if err != nil {
-			// if we can't create the direcotry the log files belong to, time to bail
-			log.Panicf("ERROR - not able to create log dir %s: %s", consoleLogDir, err)
-		}
-	}
-	calf, err := os.OpenFile(conAggLogFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
-	if err != nil {
-		log.Printf("Could not open console aggregate log file: %s", err)
-	} else {
-		log.Printf("Aggregating log file: %s", conAggLogFile)
-		conAggLogger = log.New(calf, "", 0)
-		conAggLogger.Print("Starting aggregation log")
-	}
+	//calf, err := os.OpenFile(conAggLogFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
+	//if err != nil {
+	//	log.Printf("Could not open console aggregate log file: %s", err)
+	//} else {
+	//	conAggLogger = log.New(calf, "", 0)
+	//	conAggLogger.Print("Starting aggregation log")
+	//}
 
 	// Set up the zombie killer
 	go watchForZombies()
@@ -953,6 +1410,11 @@ func main() {
 		// NOTE: do not let the user skip the update the first time through
 		rvrNodes, mtnNodes, nodes := updateConfigFile(forceConfigUpdate)
 		forceConfigUpdate = false
+
+		// keep track of how many nodes are being watched
+		// NOTE: conmand will produce an error if there are no nodes
+		numNodes := len(rvrNodes) + len(mtnNodes)
+		log.Printf("Number of nodes configured: %d", numNodes)
 
 		// update the list of tracked files and track new ones
 		for _, node := range rvrNodes {
@@ -979,6 +1441,20 @@ func main() {
 		//  spin up a new one on exit.  This will allow a user to manually
 		//  kill the conmand process and this will restart while re-reading
 		//  the configuration file.
-		executeConman()
+		if debugOnly {
+			// not really running, just give a longer pause before re-running config
+			time.Sleep(5 * time.Minute)
+		} else if numNodes == 0 {
+			// nothing found, don't try to start conmand
+			log.Printf("No console nodes found - trying again")
+			time.Sleep(30 * time.Second)
+		} else {
+			// looks good to start the conmand process
+			executeConman()
+		}
+
+		// There are times we want to wait for a little before starting a new
+		// process - ie killproc may get caught trying to kill all instances
+		time.Sleep(10 * time.Second)
 	}
 }

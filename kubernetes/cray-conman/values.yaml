@@ -27,6 +27,15 @@ cray-service:
         requests:
           cpu: 10m
           memory: 64Mi
+      env:
+      - name: LOG_ROT_ENABLE
+        value: "True"
+      - name: LOG_ROT_FILE_SIZE
+        value: "5M"
+      - name: LOG_ROT_SEC_FREQ
+        value: "600"
+      - name: LOG_ROT_NUM_KEEP
+        value: "2"
       envFrom:
       - configMapRef:
           name: conman-config
@@ -53,7 +62,7 @@ cray-service:
       image:
         repository: baseos/alpine
         tag: 3.11.5
-      args: [/bin/sh, -c, 'tail -n 0 -f /var/log/conman/consoleAgg.log']
+      args: [/bin/sh, -c, 'tail -n 0 -F /var/log/conman/consoleAgg.log']
       volumeMounts:
       - name: cray-conman-logs
         mountPath: /var/log
@@ -70,7 +79,7 @@ cray-service:
       - ReadWriteMany
       resources:
         requests:
-          storage: 5Gi
+          storage: 100Gi
   ingress:
     enabled: false
   strategy:
