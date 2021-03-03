@@ -1118,7 +1118,6 @@ func parseTimestamp(line string) (string, time.Time, bool, bool) {
 		timeStampStr = line[len(conAggLogFile)+pos+2:]
 	}
 
-	//log.Printf("  String parse - nodeName:%s, timeString:%s",nodeName, timeStampStr)
 	// process the line
 	var year, month, day, hour, min, sec int
 	_, err := fmt.Sscanf(timeStampStr, "%d-%d-%d-%d:%d:%d", &year, &month, &day, &hour, &min, &sec)
@@ -1129,8 +1128,6 @@ func parseTimestamp(line string) (string, time.Time, bool, bool) {
 	}
 	// current timestamp of this log rotation entry
 	fd = time.Date(year, time.Month(month), day, hour, min, sec, 0, time.Local)
-
-	//log.Printf("  NodeName:%s, timestamp:%s", nodeName, fd.String())
 
 	return nodeName, fd, isCon, isAgg
 }
@@ -1387,18 +1384,6 @@ func main() {
 
 	// Initialize and start log rotation
 	logRotate()
-
-	// set up a separate logger object for aggregating the console logs
-	// NOTE: this logger is thread safe, set to not append any additional
-	//  information per line, and to overwrite the file at conAggLogFile
-	//  on startup.
-	//calf, err := os.OpenFile(conAggLogFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, 0600)
-	//if err != nil {
-	//	log.Printf("Could not open console aggregate log file: %s", err)
-	//} else {
-	//	conAggLogger = log.New(calf, "", 0)
-	//	conAggLogger.Print("Starting aggregation log")
-	//}
 
 	// Set up the zombie killer
 	go watchForZombies()
