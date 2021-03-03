@@ -22,10 +22,10 @@ cray-service:
         repository: cray/cray-conman
       resources:
         limits:
-          cpu: "2"
+          cpu: "4"
           memory: 4Gi
         requests:
-          cpu: 10m
+          cpu: 100m
           memory: 64Mi
       env:
       - name: LOG_ROT_ENABLE
