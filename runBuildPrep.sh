@@ -1,4 +1,6 @@
-# Copyright 2020-2021 Hewlett Packard Enterprise Development LP
+#!/usr/bin/env sh
+
+# Copyright 2021 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -19,5 +21,7 @@
 # OTHER DEALINGS IN THE SOFTWARE.
 #
 # (MIT License)
----
-conman_label: "app.kubernetes.io/name=cray-conman"
+#
+
+./update_versions.sh || exit 1
+exit 0
